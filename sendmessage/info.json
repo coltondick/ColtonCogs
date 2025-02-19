@@ -1,0 +1,10 @@
+{
+  "name": "SendMessage",
+  "author": "Colton Dick",
+  "description": "A cog that allows sending messages on behalf of the bot.",
+  "install_msg": "Thank you for installing the SendMessage! Use [p]send <channel> <message> to send messages.",
+  "short": "Send messages as the bot.",
+  "tags": ["utility", "message", "admin"],
+  "requirements": [],
+  "hidden": false
+}
