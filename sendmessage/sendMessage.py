@@ -2,7 +2,7 @@ from redbot.core import commands, checks
 import discord
 
 
-class SendMessageCog(commands.Cog):
+class SendMessage(commands.Cog):
     """A cog to send messages on behalf of the bot."""
 
     def __init__(self, bot):
