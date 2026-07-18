@@ -1244,9 +1244,10 @@ class GoldAccess(commands.Cog):
 
         credential_text = ""
         if provisioned.playlist_url:
+            safe_playlist_url = provisioned.playlist_url.replace("`", "\\`")
             credential_text = (
                 "\n\nCredentials were returned by the provider. Send them to the customer through a private ticket or DM:\n"
-                f"```text\n{provisioned.playlist_url.replace('`', '\\`')}\n```"
+                f"```text\n{safe_playlist_url}\n```"
             )
         await self._respond(
             interaction,
