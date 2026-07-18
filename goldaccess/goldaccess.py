@@ -1244,10 +1244,15 @@ class GoldAccess(commands.Cog):
 
         credential_text = ""
         if provisioned.playlist_url:
-            safe_playlist_url = provisioned.playlist_url.replace("`", "\\`")
+            # Prevent provider-controlled text from closing the Discord code block.
+            # Keep all escaping outside f-string expressions for Python 3.11 compatibility.
+            safe_playlist_url = provisioned.playlist_url.replace("```", "``\u200b`")
             credential_text = (
-                "\n\nCredentials were returned by the provider. Send them to the customer through a private ticket or DM:\n"
-                f"```text\n{safe_playlist_url}\n```"
+                "\n\nCredentials were returned by the provider. "
+                "Send them to the customer through a private ticket or DM:\n"
+                "```text\n"
+                f"{safe_playlist_url}\n"
+                "```"
             )
         await self._respond(
             interaction,
