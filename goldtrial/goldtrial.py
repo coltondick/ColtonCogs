@@ -26,6 +26,7 @@ log = logging.getLogger("red.goldtrial")
 DEFAULT_API_URL = "https://8k.cms-only.ru/api/api.php"
 ONE_DAY_SUBSCRIPTION_ID = 8
 TRIAL_DURATION_HOURS = 24
+PUBLIC_PLAYLIST_BASE_URL = "http://muxvyr.com"
 CAPACITY_STATUSES = (
     "provisioning",
     "active",
@@ -217,6 +218,18 @@ class GoldTrial(commands.Cog):
     def _safe_code(value: str) -> str:
         return value.replace("`", "\\`")
 
+    @staticmethod
+    def _rewrite_playlist_url(playlist_url: str) -> str:
+        """Replace the provider hostname with the public customer-facing hostname."""
+        parsed = urlparse(playlist_url)
+        public = urlparse(PUBLIC_PLAYLIST_BASE_URL)
+        if not parsed.netloc or not public.netloc:
+            return playlist_url
+        return parsed._replace(
+            scheme=public.scheme or parsed.scheme,
+            netloc=public.netloc,
+        ).geturl()
+
     async def _get_api_key(self) -> str:
         env_key = os.getenv("GOLDPANEL_API_KEY", "").strip()
         if env_key:
@@ -322,6 +335,8 @@ class GoldTrial(commands.Cog):
             raise ProviderAmbiguousError(
                 "Provider reported success without returning all account details."
             )
+
+        playlist_url = self._rewrite_playlist_url(playlist_url)
 
         return ProvisionedTrial(
             provider_user_id=provider_user_id,
@@ -658,6 +673,7 @@ class GoldTrial(commands.Cog):
 
     @staticmethod
     def _credentials_embed(playlist_url: str, expires_at: int) -> discord.Embed:
+        playlist_url = GoldTrial._rewrite_playlist_url(playlist_url)
         parsed = urlparse(playlist_url)
         query = parse_qs(parsed.query)
         username = query.get("username", [""])[0]
