@@ -1,0 +1,10 @@
+{
+  "author": ["OpenAI"],
+  "description": "Gold Panel subscription-gated Discord access with paid-only protected categories, trial tracking, and access-removal exemptions for Red-DiscordBot.",
+  "install_msg": "Load the cog, enable slash commands, then run /accessadmin setup.",
+  "short": "Grant protected Discord access only to verified paid IPTV customers.",
+  "requirements": ["aiosqlite>=0.20,<1"],
+  "tags": ["iptv", "subscriptions", "roles", "gold-panel", "access-control"],
+  "type": "COG",
+  "end_user_data_statement": "Stores Discord user IDs, guild IDs, provider account IDs, subscription state, and synchronization timestamps in Red's cog data directory."
+}
