@@ -24,6 +24,8 @@ from redbot.core.data_manager import cog_data_path
 log = logging.getLogger("red.goldtrial")
 
 DEFAULT_API_URL = "https://8k.cms-only.ru/api/api.php"
+ONE_DAY_SUBSCRIPTION_ID = 8
+TRIAL_DURATION_HOURS = 24
 CAPACITY_STATUSES = (
     "provisioning",
     "active",
@@ -89,8 +91,10 @@ class GoldTrial(commands.Cog):
             api_url=DEFAULT_API_URL,
             package_id="",
             country="ALL",
+            # Legacy keys are retained for compatibility with existing Red Config data.
+            # Provisioning always uses the fixed one-day provider subscription ID below.
             subscription_months=1,
-            duration_hours=24,
+            duration_hours=TRIAL_DURATION_HOURS,
             max_concurrent_trials=10,
             manual_reserved_slots=0,
             enabled=False,
@@ -117,7 +121,10 @@ class GoldTrial(commands.Cog):
         await self._initialize_database()
         await self._ensure_hash_secret()
 
-        timeout = aiohttp.ClientTimeout(total=20, connect=10, sock_read=15)
+        # The provider has been observed taking longer than 15 seconds to finish
+        # account creation. Keep a conservative timeout so a successful creation
+        # is not incorrectly classified as unknown.
+        timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=75)
         self._session = aiohttp.ClientSession(timeout=timeout)
         self._ready.set()
         self.expiration_loop.start()
@@ -275,11 +282,6 @@ class GoldTrial(commands.Cog):
             raise ProviderConfigurationError("The trial package ID has not been configured.")
 
         country = str(await self.config.country()).strip().upper() or "ALL"
-        subscription_months = int(await self.config.subscription_months())
-        if subscription_months not in {1, 3, 6, 12}:
-            raise ProviderConfigurationError(
-                "The provider subscription value must be 1, 3, 6, or 12."
-            )
 
         notes = (
             f"discord={discord_user_id};guild={guild_id};ticket={ticket_channel_id}"
@@ -288,7 +290,9 @@ class GoldTrial(commands.Cog):
             {
                 "action": "new",
                 "type": "m3u",
-                "sub": str(subscription_months),
+                # Current Gold Panel maps subscription ID 8 to exactly one day.
+                # This is intentionally fixed and cannot be changed by configuration.
+                "sub": str(ONE_DAY_SUBSCRIPTION_ID),
                 "pack": package_id,
                 "country": country,
                 "notes": notes,
@@ -300,6 +304,20 @@ class GoldTrial(commands.Cog):
 
         provider_user_id = str(item.get("user_id", "")).strip()
         playlist_url = str(item.get("url", "")).strip()
+
+        if not playlist_url:
+            username = str(item.get("username", "")).strip()
+            password = str(item.get("password", "")).strip()
+            host = str(item.get("domain") or item.get("host") or "").strip()
+            if username and password and host:
+                host = host.rstrip("/")
+                if not host.startswith(("http://", "https://")):
+                    host = f"http://{host}"
+                playlist_url = (
+                    f"{host}/get.php?username={username}&password={password}"
+                    "&type=m3u_plus&output=ts"
+                )
+
         if not provider_user_id or not playlist_url:
             raise ProviderAmbiguousError(
                 "Provider reported success without returning all account details."
@@ -446,6 +464,13 @@ class GoldTrial(commands.Cog):
         await db.commit()
 
     async def _expire_due_trials(self) -> None:
+        """Finalize locally expired one-day trials and release their capacity slots.
+
+        Gold Panel subscription ID 8 is a provider-managed one-day line. The provider
+        should expire it automatically. We still attempt an explicit disable as a
+        best-effort cleanup, but a failed cleanup does not keep a locally expired trial
+        counted against the 10-slot capacity forever.
+        """
         now = self._utc_now_epoch()
         db = self._require_db()
         async with db.execute(
@@ -461,47 +486,18 @@ class GoldTrial(commands.Cog):
 
         for row in rows:
             provider_user_id = str(row["provider_user_id"] or "").strip()
-            if not provider_user_id:
+            cleanup_error: Optional[str] = None
+
+            if provider_user_id:
                 await db.execute(
-                    """
-                    UPDATE trial_claims
-                    SET status = 'disable_failed',
-                        last_error = 'Cannot disable trial because provider user ID is missing.'
-                    WHERE user_key = ?
-                    """,
+                    "UPDATE trial_claims SET status = 'disabling' WHERE user_key = ?",
                     (row["user_key"],),
                 )
                 await db.commit()
-                continue
-
-            await db.execute(
-                "UPDATE trial_claims SET status = 'disabling' WHERE user_key = ?",
-                (row["user_key"],),
-            )
-            await db.commit()
-
-            try:
-                await self._disable_provider_user(provider_user_id)
-            except ProviderError as exc:
-                await db.execute(
-                    """
-                    UPDATE trial_claims
-                    SET status = 'disable_failed', last_error = ?
-                    WHERE user_key = ?
-                    """,
-                    (str(exc)[:1000], row["user_key"]),
-                )
-                await db.commit()
-                await self._log_event(
-                    guild_id=row["guild_id"],
-                    title="Trial expiration failed",
-                    description=(
-                        f"Provider user ID: `{provider_user_id}`\n"
-                        "The slot remains reserved and will be retried automatically."
-                    ),
-                    color=discord.Color.red(),
-                )
-                continue
+                try:
+                    await self._disable_provider_user(provider_user_id)
+                except ProviderError as exc:
+                    cleanup_error = str(exc)[:1000]
 
             await db.execute(
                 """
@@ -511,21 +507,44 @@ class GoldTrial(commands.Cog):
                     playlist_url = NULL,
                     discord_user_id = NULL,
                     ticket_channel_id = NULL,
-                    last_error = NULL
+                    last_error = ?
                 WHERE user_key = ?
                 """,
-                (now, row["user_key"]),
+                (
+                    now,
+                    (
+                        f"Best-effort provider disable failed after automatic one-day "
+                        f"expiry: {cleanup_error}"
+                        if cleanup_error
+                        else None
+                    ),
+                    row["user_key"],
+                ),
             )
             await db.commit()
-            await self._log_event(
-                guild_id=row["guild_id"],
-                title="Trial expired",
-                description=(
-                    f"Provider user ID: `{provider_user_id}`\n"
-                    f"Expired: <t:{now}:F>"
-                ),
-                color=discord.Color.orange(),
-            )
+
+            if cleanup_error:
+                await self._log_event(
+                    guild_id=row["guild_id"],
+                    title="Trial expired with cleanup warning",
+                    description=(
+                        f"Provider user ID: `{provider_user_id or 'missing'}`\n"
+                        f"Expired: <t:{now}:F>\n"
+                        "The local capacity slot was released because the provider "
+                        "one-day line should already be expired."
+                    ),
+                    color=discord.Color.orange(),
+                )
+            else:
+                await self._log_event(
+                    guild_id=row["guild_id"],
+                    title="Trial expired",
+                    description=(
+                        f"Provider user ID: `{provider_user_id or 'missing'}`\n"
+                        f"Expired: <t:{now}:F>"
+                    ),
+                    color=discord.Color.orange(),
+                )
 
     @tasks.loop(minutes=1.0)
     async def expiration_loop(self) -> None:
@@ -738,11 +757,10 @@ class GoldTrial(commands.Cog):
                 return
 
             created_at = self._utc_now_epoch()
-            duration_hours = max(1, int(await self.config.duration_hours()))
             expires_at = int(
                 (
                     datetime.fromtimestamp(created_at, timezone.utc)
-                    + timedelta(hours=duration_hours)
+                    + timedelta(hours=TRIAL_DURATION_HOURS)
                 ).timestamp()
             )
 
@@ -928,8 +946,9 @@ class GoldTrial(commands.Cog):
         await guild_config.logs_channel_id.set(logs_channel.id)
         await self._respond(
             interaction,
-            "GoldTrial setup saved. Configure the API key, verify ticket naming, then run "
-            "`/trialadmin enable enabled:True`.",
+            "GoldTrial setup saved. Trials are fixed to the provider one-day subscription "
+            f"ID `{ONE_DAY_SUBSCRIPTION_ID}`. Configure the API key, verify ticket naming, "
+            "then run `/trialadmin enable enabled:True`.",
         )
 
     @trialadmin.command(name="enable", description="Enable or disable automatic trial provisioning")
@@ -953,7 +972,15 @@ class GoldTrial(commands.Cog):
         await self.config.enabled.set(enabled)
         await self._respond(
             interaction,
-            f"Automatic trial provisioning is now **{'enabled' if enabled else 'disabled'}**.",
+            (
+                f"Automatic trial provisioning is now **{'enabled' if enabled else 'disabled'}**."
+                + (
+                    f" New accounts use provider subscription ID {ONE_DAY_SUBSCRIPTION_ID} "
+                    f"for exactly {TRIAL_DURATION_HOURS} hours."
+                    if enabled
+                    else ""
+                )
+            ),
         )
 
     @trialadmin.command(name="capacity", description="Set the global trial slot capacity")
@@ -1030,7 +1057,7 @@ class GoldTrial(commands.Cog):
         )
         embed.add_field(name="Unknown", value=str(availability.unknown), inline=True)
         embed.set_footer(
-            text="A slot is released only after the provider account is disabled successfully."
+            text="A slot is released 24 hours after successful creation. Provider disable is best-effort at expiry."
         )
         await self._respond(interaction, embed=embed)
 
@@ -1214,7 +1241,12 @@ class GoldTrial(commands.Cog):
         )
         embed.add_field(name="Country", value=str(await self.config.country()), inline=True)
         embed.add_field(
-            name="Duration", value=f"{await self.config.duration_hours()} hours", inline=True
+            name="Duration", value=f"{TRIAL_DURATION_HOURS} hours (fixed)", inline=True
+        )
+        embed.add_field(
+            name="Provider subscription",
+            value=f"ID {ONE_DAY_SUBSCRIPTION_ID} (1 Day, fixed)",
+            inline=True,
         )
         embed.add_field(
             name="Maximum trials",
