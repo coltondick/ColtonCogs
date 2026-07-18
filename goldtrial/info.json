@@ -1,0 +1,6 @@
+{
+  "author": ["Colton"],
+  "description": "Custom Red-DiscordBot cogs for automated service provisioning.",
+  "install_msg": "Install the GoldTrial cog, configure its API key, and review the included README before enabling provisioning.",
+  "short": "Automated Red provisioning cogs"
+}
